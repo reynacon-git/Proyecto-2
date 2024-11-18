@@ -1,3 +1,500 @@
+Introducción
+# 
+# En el dinámico mundo de las aplicaciones móviles, comprender el comportamiento de los usuarios es fundamental para el éxito de cualquier producto. En este estudio, nos adentramos en el análisis del comportamiento de los usuarios de nuestra aplicación móvil de venta de productos alimenticios. Nuestro objetivo principal es optimizar la experiencia del usuario y aumentar la tasa de conversión, desde la primera interacción hasta la finalización de la compra.
+# 
+# Para lograr esto, realizamos un análisis exhaustivo del embudo de ventas, identificando los puntos críticos donde los usuarios abandonan el proceso de compra. Además, llevamos a cabo un experimento A/A/B para evaluar el impacto de un cambio en el diseño de la interfaz, específicamente en las fuentes utilizadas en toda la aplicación. Al comparar dos grupos de control con un grupo experimental, pudimos determinar si el nuevo diseño de fuente afectaba significativamente el comportamiento de los usuarios.
+# 
+# A través de este análisis, buscamos responder a preguntas clave como: ¿Cuáles son las etapas del embudo de ventas que presentan mayores desafíos para los usuarios? ¿El cambio en las fuentes tiene un impacto positivo o negativo en la tasa de conversión? Los resultados de este estudio nos permitirán tomar decisiones informadas para mejorar la usabilidad de nuestra aplicación y aumentar las ventas.
+
+# %% [markdown]
+# ## Preparación de datos
+
+# %%
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import scipy.stats as stats
+from scipy.stats import mannwhitneyu, shapiro
+
+
+# %%
+df = pd.read_csv("/datasets/logs_exp_us.csv", sep= '\s+', header=0, encoding='utf-8', names=['EventName', 'DeviceIDHash', 'EventTimestamp', 'ExpId'])
+
+df = df.rename(columns={
+    'EventName': 'event_name',
+    'DeviceIDHash' : 'device_id_hash',
+    'EventTimestamp' : 'event_time',
+    'ExpId' : 'exp_id'})
+
+df.info()
+
+# %%
+df.isna().sum()
+
+# %%
+def cambiar_nombres_grupos(df):
+    mapping = {246: 'A1', 247: 'A2', 248: 'B'}
+
+    df['grupo'] = df['exp_id'].map(mapping)
+
+    df.drop('exp_id', axis=1, inplace=True)
+
+    return df
+
+df = cambiar_nombres_grupos(df)
+print(df.head())
+
+# %%
+df['event_time'] = pd.to_datetime(df['event_time'], unit='s')
+df.head()
+
+# %%
+df['fecha'] = df['event_time'].dt.date
+df.head()
+
+# %% [markdown]
+# ## Estudiar y comprobar los datos
+
+# %%
+# 1. Número total de eventos
+total_eventos = df.shape[0]
+print("Número total de eventos:", total_eventos)
+
+# 2. Número total de usuarios únicos
+total_usuarios = df['device_id_hash'].nunique()
+print("Número total de usuarios únicos:", total_usuarios)
+
+# 3. Promedio de eventos por usuario
+promedio_eventos_por_usuario = total_eventos / total_usuarios
+print("Promedio de eventos por usuario:", promedio_eventos_por_usuario)
+
+# %%
+fecha_minima = df['fecha'].min()
+fecha_maxima = df['fecha'].max()
+
+print("Fecha más temprana:", fecha_minima)
+print("Fecha más reciente:", fecha_maxima)
+
+df.groupby(df['event_time']).size().cumsum().plot()
+plt.xlabel('Fecha y hora')
+plt.ylabel('Número acumulado de eventos')
+plt.title('Eventos acumulados por fecha y hora')
+plt.show()
+
+# %% [markdown]
+# La fecha de inicio o minima es el 25 de julio de 2019 y la fecha maxima es el 07 de agosto. un total de 13 dias, pero como se observa en la grafica a partir del 01 de agosto de 2019 es el momento en el que los datos comienzan a estar completos 
+
+# %%
+# Agrupar por evento y contar el número de usuarios únicos
+usuarios_por_evento = df.groupby('event_name')['device_id_hash'].nunique()
+
+usuarios_por_evento
+
+# %% [markdown]
+# El orden de eventos es el siguiente : pagina principal > pagina de ofertas > carrito > pago > tutorial
+# nuestro interes es la cantidad de usuarios unicos que llegan hasta la etapa de compra que en este caso son 3.547. Mientras que a la pagina principal llegan 7.439. estamos hablando que solo el 52% de los usuarios que ingresan a la pagina terminan realizando una compra. 
+
+# %%
+eventos_totales_por_evento = df.groupby('event_name').size()
+eventos_totales_por_evento
+
+# %% [markdown]
+# Al calcular la cantidad de usuarios en su totalidad que visitan la pagina. Se puede notar una gran diferencia. Donde al evento 'MainScreenAppear' llegan 119.205. Mientras que a 'PaymentScreenSuccessful ' llegan solo el 29%. Sin embargo. se puede observar un dato claro de los usuarios que llegan a la pagina principal y los que pasan a la siguiente instancia que es la "pagina de ofertas", hay una diferencia del 58%, por alguna razon una cantidad de usuarios signifcativa solo llega hasta la pagina principal.
+# 
+# para seguir con el estudio, tomaremos todos los eventos menos el "tutorial"
+
+# %%
+df = df[df['event_name'] != 'Tutorial']
+df['event_name'].unique()
+
+# %%
+fecha_inicio_a_eliminar = '2019-07-25'
+fecha_fin_a_eliminar = '2019-08-01' 
+
+df_filtrado = df[~((df['event_time'] >= fecha_inicio_a_eliminar) & (df['event_time'] <= fecha_fin_a_eliminar))].reset_index()
+df_filtrado
+
+# %% [markdown]
+# El periodo que representa realmente los datos es desde el 01 de agosto de 2019 al 07 de agosto del 2019. Se elimino el periodo previo a ese y el evento "tutorial" asi podremos seguir con el analisis. 
+# 
+# La diferencia de eventos previo a estos cambios no es muy grande, tomando en cuenta que se excluyeron 6 dias 
+# 
+# Como a partir del 01-08-2019 los datos comienzan a estar completos y esos 6 dias previos no representan cambios significativos para el analisis. considero que la mejor opcion es excluirlos del estudio. 
+
+# %% [markdown]
+# ## Embudo de eventos
+
+# %%
+# tabla pivot para contar los eventos por grupo y tipo de evento
+pivot_table = df_filtrado.pivot_table(index='grupo', columns='event_name', aggfunc='size', fill_value=0)
+print(pivot_table)
+
+columna_inicio = 'MainScreenAppear'
+columna_conversion = 'PaymentScreenSuccessful'
+
+# Calcular las tasas de conversión para cada grupo
+for grupo in pivot_table.index:
+    total_usuarios = pivot_table.loc[grupo, columna_inicio]
+    conversiones = pivot_table.loc[grupo, columna_conversion]
+    tasa_conversion = (conversiones / total_usuarios) * 100
+    print(f"Tasa de conversión para el grupo {grupo}: {tasa_conversion:.2f}%")
+    
+pivot_table.plot(kind='bar', stacked=True)
+plt.title('Embudo de Eventos')
+plt.xlabel('Grupo')
+plt.ylabel('Número de Eventos')
+plt.show()
+
+# %% [markdown]
+# Todos los grupos muestran un alto número de visualizaciones de la pantalla principal, lo que sugiere una buena atracción inicial de usuarios.Existen diferentes tasas de conversión, a pesar de que todos los grupos muestran un número similar de usuarios agregando productos al carrito, la tasa de conversión a pago varía significativamente, siendo el Grupo B el que presenta un mejor desempeño.
+# 
+# Los grupos A1 y A2 presentan oportunidades para mejorar la tasa de conversión, ya que una parte significativa de los usuarios que agregan productos al carrito no completan la compra.
+
+# %%
+# Agrupar por evento y contar el número de usuarios únicos
+usuarios_por_evento = df_filtrado.groupby('event_name')['device_id_hash'].nunique()
+
+# Ordenar los eventos por el número de usuarios de forma descendente
+usuarios_por_evento = usuarios_por_evento.sort_values(ascending=False)
+
+# proporción de usuarios que realizaron cada evento al menos una vez
+total_usuarios = df['device_id_hash'].nunique()
+proporcion_por_evento = usuarios_por_evento / total_usuarios
+
+print("Usuarios por evento :\n", usuarios_por_evento)
+print("\nUsuarios que realizaron cada evento al menos una vez:\n", proporcion_por_evento)
+
+# %% [markdown]
+# La mayoría de los usuarios inician la aplicación al visualizar la pantalla principal ("MainScreenAppear"), seguida de las ofertas ("OffersScreenAppear"), el carrito de compras y finalmente, la pantalla de pago exitosa.
+# 
+# Un alto porcentaje de usuarios (98.3%) visualiza la pantalla principal, lo que indica que la aplicación está siendo utilizada activamente.
+# La proporción de usuarios que agregan productos al carrito y completan la compra es considerablemente menor, lo que sugiere áreas de oportunidad para mejorar la conversión.
+# 
+# Los datos muestran un embudo de conversión, donde la mayoría de los usuarios inician la aplicación pero solo una fracción menor completa una compra.
+# Es importante analizar los puntos de fricción en el embudo, por ejemplo, como la transición de "OffersScreenAppear" a "CartScreenAppear". ¿Por qué los usuarios no agregan productos al carrito después de ver las ofertas?
+# 
+# La alta frecuencia de "MainScreenAppear" indica un buen nivel de engagement inicial. Sin embargo, es importante analizar si los usuarios regresan a la aplicación con frecuencia y si exploran otras secciones.
+# 
+# La cantidad de usuarios que visualizan las ofertas es significativa un 60,8%, lo que sugiere que las ofertas son relevantes para los usuarios. Sin embargo, la tasa de conversión a compra podría ser mayor.
+# 
+# Como recomendacion los datos pueden ayudar a identificar áreas donde se puede mejorar la experiencia del usuario, como simplificar el proceso de compra, ofrecer recomendaciones de productos más personalizadas o mejorar la visibilidad de las ofertas más atractivas.
+# 
+# Ya que tenemos una columna timestamp nos permite saber la secuencia de los eventos dentro de la pagina.
+
+# %%
+# Agrupar por usuario y ordenar por tiempo
+df_ordenado = df_filtrado.sort_values(['device_id_hash', 'event_time'])
+
+# Crear una nueva columna para el orden de los eventos
+df_ordenado['event_order'] = df_ordenado.groupby('device_id_hash').cumcount()
+
+# DataFrame pivot para visualizar el embudo
+embudo = pd.pivot_table(df_ordenado, index='device_id_hash', columns='event_name', values='event_order', aggfunc='min')
+
+orden = ['MainScreenAppear', 'OffersScreenAppear', 'CartScreenAppear', 'PaymentScreenSuccessful']
+
+# porcentaje de usuarios en cada etapa
+porcentajes = embudo.count() / embudo.shape[0] * 100
+print(porcentajes)
+
+porcentajes = porcentajes.reindex(orden)
+plt.bar(porcentajes.index, porcentajes.values)
+plt.xlabel('Etapa del embudo')
+plt.ylabel('Porcentaje de usuarios')
+plt.title('Embudo de conversión')
+plt.xticks(rotation=45)
+plt.show()
+
+# %% [markdown]
+# El análisis del porcentaje de usuarios en cada etapa del embudo nos ha proporcionado una visión general del recorrido del usuario en nuestra plataforma. Observamos que el 98.53% de los usuarios llegan a la pantalla principal, lo que indica un alto nivel de tráfico inicial. Sin embargo, el porcentaje de usuarios que avanzan a las siguientes etapas presenta una disminución progresiva.
+# 
+# En particular, llama la atención que solo el 60.99% de los usuarios llegan a la pantalla de ofertas y el 46.99% completa la compra. Estos datos sugieren que existe una pérdida significativa de usuarios entre las diferentes etapas del embudo.
+# 
+# Posibles causas de esta disminución podrían ser:
+# 
+# *Las ofertas presentadas podrían no ser lo suficientemente atractivas o relevantes para los usuarios.
+# 
+# *El proceso de navegación entre las diferentes pantallas puede ser confuso o demasiado complejo.
+# 
+# *El proceso de pago puede ser lento, poco seguro o presentar errores.
+
+# %%
+# Ordenar por usuario y tiempo
+df_ordenado = df.sort_values(['device_id_hash', 'event_time'])
+
+# Crear una nueva columna para el orden de los eventos
+df_ordenado['event_order'] = df_ordenado.groupby('device_id_hash').cumcount()
+
+# Definir las etapas del embudo
+etapas = ['MainScreenAppear', 'OffersScreenAppear', 'CartScreenAppear', 'PaymentScreenSuccessful']
+
+# Crear un diccionario para almacenar las proporciones
+proporciones = {}
+
+# Iterar sobre todas las posibles transiciones
+for i in range(len(etapas) - 1):
+    etapa_actual = etapas[i]
+    etapa_siguiente = etapas[i+1]
+
+    # Filtrar los eventos que corresponden a la transición
+    transicion = df_ordenado[(df_ordenado['event_name'] == etapa_siguiente) &
+                            (df_ordenado['event_order'] == 1) &
+                            (df_ordenado.groupby('device_id_hash')['event_name'].shift() == etapa_actual)]
+
+    # Calcular el total de usuarios en la etapa actual
+    total_etapa_actual = df_ordenado[df_ordenado['event_name'] == etapa_actual].shape[0]
+
+    # Calcular la proporción
+    proporcion = transicion.shape[0] / total_etapa_actual
+
+    # Almacenar la proporción en el diccionario
+    proporciones[f"{etapa_actual} -> {etapa_siguiente}"] = proporcion
+
+# Crear un DataFrame con las proporciones
+df_proporciones = pd.DataFrame.from_dict(proporciones, orient='index', columns=['Proporción'])
+print(df_proporciones)
+
+# %% [markdown]
+# El análisis de las tasas de conversión ha revelado puntos críticos significativos en nuestro embudo de ventas. Observamos que solo el 1.01% de los usuarios que llegan a la pantalla principal avanzan a la sección de ofertas, mientras que un porcentaje aún menor (0.07%) procede a agregar productos al carrito. La tasa de conversión más baja se encuentra en la transición de carrito a pago, con apenas un 0.18% de los usuarios completando la compra.
+# 
+# Estos bajos porcentajes sugieren que estamos enfrentando desafíos en las etapas iniciales de nuestro embudo, así como en el proceso de finalización de la compra. Es probable que factores como por ejemplo: diseño poco intuitivo, ofertas poco atractivas, problemas en el proceso de pago estén influyendo en el abandono de los usuarios.
+# 
+# Para abordar estas problemáticas, propongo las siguientes acciones:
+# 
+# *Simplificar el diseño, destacar los beneficios clave y facilitar la navegación hacia las ofertas.
+# 
+# *Asegurarnos de que las ofertas sean atractivas y estén alineadas con las necesidades de los usuarios.
+# 
+# *Reducir el número de pasos, ofrecer múltiples opciones de pago y garantizar la seguridad de la transacción.
+# 
+# *Implementar estrategias de remarketing: Recuperar a los usuarios que abandonaron el carrito mediante emails personalizados y ofertas especiales.
+# 
+# Al implementar estas mejoras, esperamos aumentar significativamente las tasas de conversión en cada etapa del embudo y, en consecuencia, incrementar las ventas.
+
+# %% [markdown]
+# **¿En qué etapa se pierden más usuarios?
+# 
+# Basándonos en los resultados de ambos códigos, podemos concluir que la mayor pérdida de usuarios se produce entre la etapa de "OffersScreenAppear" (Pantalla de ofertas) y "CartScreenAppear" (Añadir al carrito).
+# 
+# Tasas de conversión: El porcentaje de usuarios que avanzan de la pantalla de ofertas al carrito es extremadamente bajo (0.07%).
+# 
+# Porcentaje de usuarios en cada etapa: Aunque un alto porcentaje de usuarios llega a la pantalla de ofertas, hay una disminución significativa en el número de usuarios que llegan al carrito.
+# 
+# Esto sugiere que existe un obstáculo importante que impide a los usuarios agregar productos a su carrito.
+# 
+# **¿Qué porcentaje de usuarios hace todo el viaje desde su primer evento hasta el pago?
+# 
+# Para responder a esta pregunta, debemos calcular el porcentaje de usuarios que llegan a la etapa final del embudo "PaymentScreenSuccessful".
+# 
+# Basándonos en el código 2, el 46.99% de los usuarios completa todo el viaje desde su primer evento hasta el pago. Esto significa que casi la mitad de los usuarios que inician su recorrido en la plataforma llegan a realizar una compra.
+# 
+# Sin embargo, este porcentaje aún puede considerarse bajo y representa una oportunidad de mejora.
+
+# %% [markdown]
+# ## Resultados de prueba A/A/B
+
+# %%
+# cantidad de usuarios únicos en cada grupo
+conteo_usuarios_por_grupo = df_ordenado['grupo'].value_counts()
+
+print(conteo_usuarios_por_grupo)
+
+# %%
+
+df_ordenado.head()
+
+
+# %%
+df_ordenado['tuvo_pago_exitoso'] = df_ordenado['event_name'].apply(lambda x: 1 if x == 'PaymentScreenSuccessful' else 0)
+
+usuarios_con_pago_exitoso = df_ordenado.groupby('device_id_hash')['tuvo_pago_exitoso'].max().reset_index()
+
+usuarios_con_pago_exitoso = pd.merge(usuarios_con_pago_exitoso, df_ordenado[['device_id_hash', 'grupo']], on='device_id_hash', how='left')
+
+# grupos A1 y A2
+group_a1 = usuarios_con_pago_exitoso[usuarios_con_pago_exitoso['grupo'] == 'A1']['tuvo_pago_exitoso']
+group_a2 = usuarios_con_pago_exitoso[usuarios_con_pago_exitoso['grupo'] == 'A2']['tuvo_pago_exitoso']
+
+# Prueba de Shapiro-Wilk para normalidad
+statistic_a1, p_value_a1 = shapiro(group_a1)
+statistic_a2, p_value_a2 = shapiro(group_a2)
+
+print(f"Prueba de Shapiro-Wilk para A1: statistic = {statistic_a1}, p-value = {p_value_a1}")
+print(f"Prueba de Shapiro-Wilk para A2: statistic = {statistic_a2}, p-value = {p_value_a2}")
+
+# Selección de la prueba estadística
+if p_value_a1 > 0.01 and p_value_a2 > 0.01:
+    # Distribución normal: Prueba t de Student
+    t_statistic, p_value = ttest_ind(group_a1, group_a2)
+    print(f"Prueba t de Student: t-statistic = {t_statistic}, p-value = {p_value}")
+else:
+    # Distribución no normal: Prueba de Mann-Whitney U
+    U_statistic, p_value = mannwhitneyu(group_a1, group_a2)
+    print(f"Prueba de Mann-Whitney U: U-statistic = {U_statistic}, p-value = {p_value}")
+
+alpha = 0.01  
+if p_value < alpha:
+    print("Hay una diferencia estadísticamente significativa entre A1 y A2.")
+else:
+    print("No hay una diferencia estadísticamente significativa entre A1 y A2.")
+
+# %% [markdown]
+# Para este análisis buscaba determinar si existe una diferencia estadísticamente significativa en la tasa de conversión a pago entre los grupos A1 y A2. Donde se encontro que Si hay una diferencia. Quiere decir que son mas los usuarios del grupo A1 que completan compras dentro de la aplicacion
+
+# %%
+# datos para los grupos A1 y A2
+df_A1_A2 = df[df['grupo'].isin(['A1', 'A2'])]
+
+
+eventos_por_grupo = df_A1_A2.groupby(['grupo', 'event_name']).size().reset_index(name='cantidad')
+
+# total de usuarios por grupo
+total_usuarios_por_grupo = df_A1_A2.groupby('grupo').size().reset_index(name='total_usuarios_grupo')
+
+
+resultados = pd.merge(eventos_por_grupo, total_usuarios_por_grupo, on='grupo')
+resultados['proporcion'] = resultados['cantidad'] / resultados['total_usuarios_grupo']
+
+# evento más popular en cada grupo
+eventos_mas_populares = resultados.groupby('grupo').apply(lambda x: x.loc[x['cantidad'].idxmax()])
+
+
+grupo_A1_popular = eventos_mas_populares.loc['A1', 'proporcion']
+grupo_A2_popular = eventos_mas_populares.loc['A2', 'proporcion']
+
+# Verificar normalidad para el grupo A1
+stat, p = shapiro(resultados.loc[resultados['grupo'] == 'A1', 'proporcion'])
+print(f"Prueba de Shapiro-Wilk para A1: statistic = {stat}, p-value = {p}")
+
+# Verificar normalidad para el grupo A2
+stat, p = shapiro(resultados.loc[resultados['grupo'] == 'A2', 'proporcion'])
+print(f"Prueba de Shapiro-Wilk para A2: statistic = {p}")
+
+    
+u_statistic, p_value = stats.mannwhitneyu(grupo_A1_popular, grupo_A2_popular)
+
+print("Evento más popular en A1:", eventos_mas_populares.loc['A1', 'event_name'])
+print("Evento más popular en A2:", eventos_mas_populares.loc['A2', 'event_name'])
+print("Proporción en A1:", grupo_A1_popular)
+print("Proporción en A2:", grupo_A2_popular)
+print("p-valor de la prueba de Mann-Whitney U:", p_value)
+
+# %% [markdown]
+# El p-valor obtenido de la prueba de Mann-Whitney U es de 1.0. Un p-valor tan alto indica que no hay evidencia suficiente para rechazar la hipótesis nula. En otras palabras, no podemos concluir que exista una diferencia estadísticamente significativa entre las proporciones de los grupos A1 y A2 en cuanto al evento "MainScreenAppear".
+#  
+
+# %%
+def analizar_eventos(df):
+  
+    # agrupar por grupo y evento
+    eventos_por_grupo = df.groupby(['grupo', 'event_name']).size().reset_index(name='total_usuarios')
+
+    # total de usuarios por grupo
+    total_usuarios_por_grupo = df.groupby('grupo').size().reset_index(name='total_usuarios_grupo')
+
+    
+    resultados = pd.merge(eventos_por_grupo, total_usuarios_por_grupo, on='grupo')
+    resultados['proporcion'] = resultados['total_usuarios'] / resultados['total_usuarios_grupo']
+
+    return resultados
+
+
+resultados_todos_eventos = analizar_eventos(df_ordenado)
+resultados_todos_eventos
+
+# %%
+# grafica de proporciones de eventos por grupo
+resultados = analizar_eventos(df_ordenado)
+
+resultados = resultados.sort_values(by='event_name', key=lambda x: x.map({'MainScreenAppear': 0, 'OffersScreenAppear': 1, 'CartScreenAppear': 2, 'PaymentScreenSuccessful':3}))
+
+# Filtrar los resultados para cada grupo
+grupos = resultados['grupo'].unique()
+
+colores = ['skyblue', 'orange', 'green']
+
+fig, axes = plt.subplots(nrows=1, ncols=len(grupos), figsize=(15, 5))
+
+for i, grupo in enumerate(grupos):
+    resultados_grupo = resultados[resultados['grupo'] == grupo]
+    resultados_grupo.plot(x='event_name', y='proporcion', kind='bar', ax=axes[i], color=colores[i])
+    axes[i].set_title(f'Grupo {grupo}')
+    axes[i].set_xlabel('Evento')
+    axes[i].set_ylabel('Proporción')
+    axes[i].tick_params(axis='x', rotation=45)
+
+plt.tight_layout()
+plt.show()
+
+# %% [markdown]
+# El objetivo de este análisis fue comparar el comportamiento de los usuarios en diferentes grupos, evaluando la proporción de usuarios que completaron cada etapa del proceso de compra.
+# 
+# Los resultados muestran que el evento más popular en todos los grupos fue la visita a la página principal. Sin embargo, al analizar cada evento en detalle, se observaron diferencias significativas entre los grupos.
+# 
+# Página principal: Si bien la mayoría de los usuarios visitaron la página principal en todos los grupos, se observaron pequeñas variaciones en las proporciones.
+# 
+# Página de ofertas: El grupo A2, seguido del grupo B, mostraron una mayor proporción de usuarios que visitaron la página de ofertas, lo que sugiere una mayor sensibilidad a las promociones en este grupo.
+# 
+# Carrito: El grupo A1 presentó la proporción más alta de usuarios que agregaron productos al carrito, indicando una mayor intención de compra en este segmento.
+# 
+# Pago: Los resultados revelaron que el grupo A1 tuvo la tasa de conversión más alta, es decir, una mayor proporción de usuarios completaron la compra.
+# 
+# En conclusión, los resultados sugieren que existen diferencias significativas en el comportamiento de los usuarios entre los diferentes grupos. Sim embargo, las diferencias no son tan grandes como para afirmar que el cambio de fuente en toda la aplicaion generen disgusto en los usuarios.
+
+# %%
+# diferencias estadisticamente significativas 
+evento_seleccionado = "PaymentScreenSuccessful"
+
+
+grupo_B_proporcion = resultados_todos_eventos[(resultados_todos_eventos['grupo'] == 'B') & 
+                                            (resultados_todos_eventos['event_name'] == evento_seleccionado)]['proporcion'].values[0]
+grupo_A1_proporcion = resultados_todos_eventos[(resultados_todos_eventos['grupo'] == 'A1') & 
+                                            (resultados_todos_eventos['event_name'] == evento_seleccionado)]['proporcion'].values[0]
+
+U1, p = stats.mannwhitneyu(grupo_B_proporcion, grupo_A1_proporcion)
+
+print(f"Evento: {evento_seleccionado}")
+print(f"Proporción en B: {grupo_B_proporcion}")
+print(f"Proporción en A1: {grupo_A1_proporcion}")
+print(f"p-valor: {p}")
+
+# %% [markdown]
+# Al comprar proporciones la mejor opcion es la prueba Mann Whitney U. Y como resultado obtuvimos que No existe una diferencia estadísticamente significativa entre los grupos B y A1 en términos de la proporción de usuarios que completan el proceso de pago. Esto sugiere que el cambio en las fuentes no ha tenido un impacto significativo en la tasa de conversión de pagos.
+
+# %% [markdown]
+# ## Conclusion general
+
+# %% [markdown]
+# El análisis realizado sobre el comportamiento de los usuarios en la aplicación ha revelado patrones interesantes y oportunidades de mejora. Aunque el cambio en las fuentes no ha demostrado tener un impacto estadísticamente significativo en la tasa de conversión a pago, se han identificado otros factores clave que afectan el recorrido del usuario a través del embudo de ventas.
+# 
+# Embudo de conversión: Existe una clara disminución en el número de usuarios a medida que avanzan por el embudo, especialmente en la transición de la página de ofertas al carrito y del carrito al pago.
+# 
+# Cambio de las fuentes: El cambio de fuente no parece ser el factor determinante en la tasa de conversión, lo que sugiere que otros elementos del diseño o la experiencia del usuario podrían estar influyendo más.
+# 
+# Oportunidades de mejora: Se han identificado varios puntos del embudo donde se pueden implementar mejoras para aumentar la tasa de conversión, como optimizar el diseño de las páginas de ofertas, simplificar el proceso de pago y personalizar las recomendaciones de productos.
+# 
+# Recomendaciones:
+# 
+# *Optimizar el embudo de ventas: Centrarse en mejorar la experiencia del usuario en las etapas donde se produce una mayor pérdida de usuarios, especialmente en la transición de la página de ofertas al carrito.
+# 
+# *Personalización: Implementar estrategias de personalización para ofrecer a los usuarios recomendaciones de productos más relevantes y atractivas.
+# 
+# *Análisis de cohortes: Realizar un seguimiento del comportamiento de los usuarios a lo largo del tiempo para identificar patrones y tendencias.
+# 
+# *Segmentación de usuarios: Segmentar a los usuarios en función de características demográficas y de comportamiento para adaptar la experiencia del usuario.
+# 
+# ¿Es recomendable continuar con el test A/A/B?
+# 
+# Dado que el cambio de fuente no ha mostrado un impacto significativo en la tasa de conversión, podría no ser prioritario continuar con este test en particular.
+# 
+# Sugerencia:
+# 
+# En lugar de centrarse en el cambio de fuente, se podrían realizar pruebas A/B en otros elementos del diseño, como la disposición de los elementos en la página, los botones de llamada a la acción o el lenguaje utilizado en las descripciones de los productos.
+# 
+# El análisis realizado ha proporcionado una visión valiosa sobre el comportamiento de los usuarios y ha identificado áreas de mejora. Al implementar las recomendaciones mencionadas anteriormente, se puede aumentar significativamente la tasa de conversión y mejorar la experiencia del usuario en general.
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
